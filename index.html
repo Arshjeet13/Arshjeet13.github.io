@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blotto 1v1</title>
+<style>
+:root{--bg:#0e1116;--panel:#171b22;--line:#2a303a;--text:#e8eaed;--dim:#8b93a1;--a:#8b7ff0;--b:#2fbf8f;--warn:#f0b34a;--bad:#ef6a6a}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:28px 16px 56px}
+h1{font-size:22px;font-weight:600;margin:0 0 20px;letter-spacing:.02em}
+h2{font-size:20px;font-weight:600;margin:0 0 12px}
+p{margin:0 0 12px}
+.dim{color:var(--dim);font-size:14px}
+.err{color:var(--bad);font-size:14px;min-height:20px}
+label{display:block;font-size:13px;color:var(--dim);margin-bottom:4px}
+input{width:100%;height:40px;padding:0 10px;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:8px;font:inherit}
+input:focus{outline:2px solid var(--a);outline-offset:1px}
+input:disabled{opacity:.55}
+button{height:40px;padding:0 16px;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;font:inherit;cursor:pointer}
+button:hover{border-color:var(--dim)}
+button.primary{background:var(--a);border-color:var(--a);color:#fff;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grow{flex:1;min-width:0}
+.modes{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px}
+.mode{flex:1;min-width:200px;height:auto;padding:12px 14px;text-align:left;line-height:1.4}
+.mode.on{border:2px solid var(--a)}
+.mode span{display:block;font-size:13px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:16px}
+.hill{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px}
+.hill .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px;font-size:14px}
+.hill .top b{font-weight:600}
+.hud{display:flex;gap:12px;margin-bottom:16px}
+.stat{flex:1;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.stat .big,.card .big{font-size:28px;font-weight:600;font-variant-numeric:tabular-nums;line-height:1.2}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.dot.a{background:var(--a)}.dot.b{background:var(--b)}
+.scores{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card.win.me{border:2px solid var(--a)}.card.win.opp{border:2px solid var(--b)}
+.res{display:grid;grid-template-columns:92px minmax(0,1fr) 38px 38px minmax(0,1fr);gap:8px;align-items:center;padding:7px 0;border-bottom:1px solid var(--line);font-size:14px;font-variant-numeric:tabular-nums}
+.bar{height:10px;border-radius:2px}
+.bar.a{background:var(--a);margin-left:auto}.bar.b{background:var(--b)}
+.num{text-align:center;border-radius:6px;padding:2px 0;color:var(--dim)}
+.num.wa{background:rgba(139,127,240,.22);color:#cfc9ff;font-weight:600}
+.num.wb{background:rgba(47,191,143,.2);color:#a6ecd3;font-weight:600}
+</style>
+</head>
+<body>
+<main>
+<h1>Blotto 1v1</h1>
+<div id="app"></div>
+</main>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const DUR = 90, HILLS = 10, TOTAL = 100, PREFIX = 'blotto1v1-';
+const app = document.getElementById('app');
+const S = { host:false, me:'', opp:'Opponent', mode:'unweighted', code:'', peer:null, conn:null,
+  mine:null, theirs:null, locked:false, oppLocked:false, sent:false, timer:null, endAt:0,
+  wins:[0,0], draws:0, phase:'home', rev:0 };
+
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const val = i => S.mode === 'weighted' ? i + 1 : 1;
+const fmt = n => Number.isInteger(n) ? String(n) : n.toFixed(1);
+const pts = v => v + (v === 1 ? ' pt' : ' pts');
+const send = m => { if (S.conn && S.conn.open) S.conn.send(m); };
+const newCode = () => Math.random().toString(36).slice(2, 8);
+
+function home(msg) {
+  S.phase = 'home';
+  const joining = location.hash.length > 1;
+  app.innerHTML = `
+    <div class="panel">
+      <p class="dim">${joining ? 'You were invited to a game.' : 'Create a game, then send the link to your friend.'}
+      Each of you secretly splits ${TOTAL} units across ${HILLS} hills. Hills are revealed after ${DUR} seconds.</p>
+      <label for="name">Your name</label>
+      <div class="row">
+        <input id="name" class="grow" maxlength="20" placeholder="Sam" value="${esc(S.me)}">
+        <button id="go" class="primary">${joining ? 'Join game' : 'Create game'}</button>
+      </div>
+      <p class="err" id="err">${msg ? esc(msg) : ''}</p>
+    </div>`;
+  const go = () => {
+    const n = document.getElementById('name').value.trim();
+    if (!n) { document.getElementById('err').textContent = 'Enter a name first.'; return; }
+    S.me = n;
+    joining ? joinGame() : createGame();
+  };
+  document.getElementById('go').onclick = go;
+  document.getElementById('name').onkeydown = e => { if (e.key === 'Enter') go(); };
+}
+
+function waiting(text) {
+  app.innerHTML = `<div class="panel"><p>${esc(text)}</p></div>`;
+}
+
+function createGame() {
+  S.host = true;
+  S.code = newCode();
+  waiting('Setting up your game…');
+  const peer = S.peer = new Peer(PREFIX + S.code);
+  peer.on('open', () => lobby());
+  peer.on('connection', c => {
+    if (S.conn && S.conn.open) { c.close(); return; }
+    bind(c);
+  });
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') { peer.destroy(); createGame(); return; }
+    if (S.phase === 'home' || !S.conn) home("Couldn't reach the connection server. Try again.");
+  });
+}
+
+function joinGame() {
+  S.host = false;
+  S.code = location.hash.slice(1);
+  waiting('Connecting to the game…');
+  const peer = S.peer = new Peer();
+  peer.on('open', () => bind(peer.connect(PREFIX + S.code, { reliable: true })));
+  peer.on('error', e => {
+    if (e.type === 'peer-unavailable') home('No game found at this link. The host needs to keep their tab open.');
+    else if (!S.conn || !S.conn.open) home("Couldn't connect. Try again.");
+  });
+}
+
+function bind(c) {
+  S.conn = c;
+  c.on('open', () => {
+    send({ t:'hello', name:S.me });
+    if (!S.host) { S.phase = 'lobby'; lobby(); }
+  });
+  c.on('data', onData);
+  c.on('close', dropped);
+}
+
+function dropped() {
+  if (S.conn && S.conn.open) return;
+  clearInterval(S.timer);
+  S.rev++;
+  S.conn = null;
+  if (S.host) { S.opp = 'Opponent'; lobby('Your friend disconnected. They can rejoin with the same link.'); }
+  else {
+    app.innerHTML = `<div class="panel"><p>Connection lost.</p><button id="re" class="primary">Rejoin</button></div>`;
+    document.getElementById('re').onclick = () => location.reload();
+  }
+}
+
+function onData(m) {
+  if (!m || typeof m !== 'object') return;
+  if (m.t === 'hello') {
+    S.opp = String(m.name || 'Opponent').slice(0, 20);
+    if (S.phase === 'lobby') lobby();
+  } else if (m.t === 'start') {
+    S.mode = m.mode === 'weighted' ? 'weighted' : 'unweighted';
+    startRound();
+  } else if (m.t === 'locked') {
+    S.oppLocked = true;
+    const el = document.getElementById('oppst');
+    if (el) el.textContent = S.opp + ' has locked in.';
+    if (S.locked) submit();
+  } else if (m.t === 'alloc') {
+    S.theirs = clean(m.v);
+    if (!S.sent) submit();
+    maybeReveal();
+  }
+}
+
+function clean(v) {
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < HILLS; i++) {
+    let n = Array.isArray(v) ? Math.floor(Number(v[i]) || 0) : 0;
+    n = Math.max(0, Math.min(n, TOTAL - sum));
+    sum += n;
+    out.push(n);
+  }
+  return out;
+}
+
+function modeButtons() {
+  return `<div class="modes">
+    <button class="mode ${S.mode === 'unweighted' ? 'on' : ''}" data-m="unweighted">Unweighted<span>Every hill is worth 1 point. 10 total.</span></button>
+    <button class="mode ${S.mode === 'weighted' ? 'on' : ''}" data-m="weighted">Weighted<span>Hill n is worth n points. 55 total.</span></button>
+  </div>`;
+}
+function wireModes() {
+  document.querySelectorAll('.mode').forEach(b => b.onclick = () => {
+    S.mode = b.dataset.m;
+    document.querySelectorAll('.mode').forEach(x => x.classList.toggle('on', x === b));
+  });
+}
+function hostStart() {
+  send({ t:'start', mode:S.mode });
+  startRound();
+}
+
+function lobby(note) {
+  S.phase = 'lobby';
+  const connected = S.conn && S.conn.open;
+  if (!S.host) {
+    app.innerHTML = `<div class="panel"><h2>You're in</h2><p class="dim">Waiting for ${esc(S.opp)} to start the round.</p></div>`;
+    return;
+  }
+  const link = location.href.split('#')[0] + '#' + S.code;
+  app.innerHTML = `
+    <div class="panel">
+      <label for="link">Invite link</label>
+      <div class="row"><input id="link" class="grow" readonly value="${esc(link)}"><button id="copy">Copy link</button></div>
+      <p class="dim" style="margin-top:10px">${note ? esc(note) : connected ? esc(S.opp) + ' has joined.' : 'Waiting for your friend to open the link. Keep this tab open.'}</p>
+    </div>
+    <div class="panel">
+      <label>Mode</label>
+      ${modeButtons()}
+      <button id="start" class="primary" ${connected ? '' : 'disabled'}>Start round</button>
+    </div>`;
+  wireModes();
+  document.getElementById('copy').onclick = () => {
+    const inp = document.getElementById('link');
+    const done = () => { document.getElementById('copy').textContent = 'Copied'; };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(link).then(done, () => { inp.select(); });
+    else { inp.select(); document.execCommand('copy'); done(); }
+  };
+  document.getElementById('start').onclick = hostStart;
+}
+
+function startRound() {
+  S.rev++;
+  clearInterval(S.timer);
+  S.mine = null; S.theirs = null; S.locked = false; S.oppLocked = false; S.sent = false;
+  S.phase = 'play';
+  S.endAt = Date.now() + DUR * 1000;
+  let cells = '';
+  for (let i = 0; i < HILLS; i++) {
+    cells += `<div class="hill"><div class="top"><b>Hill ${i + 1}</b><span class="dim">${pts(val(i))}</span></div>
+      <input type="number" inputmode="numeric" min="0" max="${TOTAL}" step="1" placeholder="0" class="h" aria-label="Units on hill ${i + 1}"></div>`;
+  }
+  app.innerHTML = `
+    <div class="hud">
+      <div class="stat"><div class="dim">Time left</div><div class="big" id="time">${DUR}</div></div>
+      <div class="stat"><div class="dim">Units remaining</div><div class="big" id="rem">${TOTAL}</div></div>
+    </div>
+    <div class="grid">${cells}</div>
+    <div class="row">
+      <span class="dim grow" id="oppst">${esc(S.opp)} is still placing units.</span>
+      <button id="even">Split evenly</button><button id="clear">Clear</button><button id="lock" class="primary">Lock in</button>
+    </div>
+    <p class="dim" style="margin-top:12px">${S.mode === 'weighted' ? 'Weighted' : 'Unweighted'} round. Anything you haven't placed when time runs out is lost.</p>`;
+  const ins = [...document.querySelectorAll('.h')];
+  const rem = document.getElementById('rem');
+  const refresh = () => {
+    const r = TOTAL - ins.reduce((s, x) => s + (Number(x.value) || 0), 0);
+    rem.textContent = r;
+    rem.style.color = r === 0 ? 'var(--b)' : '';
+  };
+  ins.forEach(x => x.oninput = () => {
+    if (x.value !== '') {
+      const others = ins.reduce((s, y) => s + (y === x ? 0 : (Number(y.value) || 0)), 0);
+      let v = Math.floor(Math.max(0, Number(x.value) || 0));
+      v = Math.min(v, TOTAL - others);
+      if (String(v) !== x.value) x.value = v;
+    }
+    refresh();
+  });
+  document.getElementById('even').onclick = () => { ins.forEach(x => x.value = TOTAL / HILLS); refresh(); };
+  document.getElementById('clear').onclick = () => { ins.forEach(x => x.value = ''); refresh(); };
+  document.getElementById('lock').onclick = lock;
+  tick();
+  S.timer = setInterval(tick, 250);
+}
+
+function tick() {
+  const left = Math.max(0, Math.ceil((S.endAt - Date.now()) / 1000));
+  const el = document.getElementById('time');
+  if (el) { el.textContent = left; el.style.color = left <= 10 ? 'var(--warn)' : ''; }
+  if (left <= 0) submit();
+}
+
+function freeze() {
+  document.querySelectorAll('.h').forEach(x => x.disabled = true);
+  ['even', 'clear', 'lock'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+}
+
+function lock() {
+  if (S.locked || S.sent) return;
+  S.locked = true;
+  freeze();
+  document.getElementById('lock').textContent = 'Locked in';
+  send({ t:'locked' });
+  if (S.oppLocked) submit();
+}
+
+function submit() {
+  if (S.sent || S.phase !== 'play') return;
+  S.sent = true;
+  clearInterval(S.timer);
+  S.mine = clean([...document.querySelectorAll('.h')].map(x => x.value));
+  freeze();
+  send({ t:'alloc', v:S.mine });
+  const el = document.getElementById('oppst');
+  if (el) el.textContent = 'Waiting for ' + S.opp + '…';
+  maybeReveal();
+}
+
+function maybeReveal() {
+  if (S.phase === 'play' && S.mine && S.theirs) reveal();
+}
+
+function reveal() {
+  S.phase = 'result';
+  clearInterval(S.timer);
+  const a = S.mine, b = S.theirs, mx = Math.max(1, ...a, ...b);
+  app.innerHTML = `
+    <h2 id="headline">Revealing hills…</h2>
+    <div class="scores">
+      <div class="card me" id="cm"><div class="dim"><i class="dot a"></i>${esc(S.me)} (you)</div><div class="big" id="s0">0</div></div>
+      <div class="card opp" id="co"><div class="dim"><i class="dot b"></i>${esc(S.opp)}</div><div class="big" id="s1">0</div></div>
+    </div>
+    <div id="rows"></div>
+    <div id="after" style="margin-top:16px"></div>`;
+  const rows = document.getElementById('rows');
+  const sc = [0, 0];
+  const token = ++S.rev;
+  let i = 0;
+  (function step() {
+    if (token !== S.rev) return;
+    if (i >= HILLS) { finish(sc); return; }
+    const v = val(i), w = a[i] > b[i] ? 0 : b[i] > a[i] ? 1 : -1;
+    if (w < 0) { sc[0] += v / 2; sc[1] += v / 2; } else sc[w] += v;
+    const d = document.createElement('div');
+    d.className = 'res';
+    d.innerHTML = `<span>Hill ${i + 1}${S.mode === 'weighted' ? ' <span class="dim">' + pts(v) + '</span>' : ''}</span>
+      <div><div class="bar a" style="width:${Math.round(a[i] / mx * 100)}%"></div></div>
+      <span class="num ${w === 0 ? 'wa' : ''}">${a[i]}</span>
+      <span class="num ${w === 1 ? 'wb' : ''}">${b[i]}</span>
+      <div><div class="bar b" style="width:${Math.round(b[i] / mx * 100)}%"></div></div>`;
+    rows.appendChild(d);
+    document.getElementById('s0').textContent = fmt(sc[0]);
+    document.getElementById('s1').textContent = fmt(sc[1]);
+    i++;
+    setTimeout(step, 650);
+  })();
+}
+
+function finish(sc) {
+  const w = sc[0] > sc[1] ? 0 : sc[1] > sc[0] ? 1 : -1;
+  if (w < 0) S.draws++; else S.wins[w]++;
+  document.getElementById('headline').textContent = w === 0 ? 'You win' : w === 1 ? S.opp + ' wins' : 'Dead heat';
+  if (w === 0) document.getElementById('cm').classList.add('win');
+  if (w === 1) document.getElementById('co').classList.add('win');
+  const series = `Tied hills split their points. Series: ${esc(S.me)} ${S.wins[0]}, ${esc(S.opp)} ${S.wins[1]}${S.draws ? ', draws ' + S.draws : ''}.`;
+  const after = document.getElementById('after');
+  if (S.host) {
+    after.innerHTML = `<p class="dim">${series}</p>${modeButtons()}<button id="next" class="primary">Start next round</button>`;
+    wireModes();
+    document.getElementById('next').onclick = hostStart;
+  } else {
+    after.innerHTML = `<p class="dim">${series}</p><p class="dim">Waiting for ${esc(S.opp)} to start the next round.</p>`;
+  }
+}
+
+home();
+</script>
+</body>
+</html>
