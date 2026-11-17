@@ -53,24 +53,81 @@ button:disabled{opacity:.5;cursor:default}
 <main>
 <h1>Blotto 1v1</h1>
 <div id="app"></div>
+<p class="err" id="net"></p>
 </main>
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
-const DUR = 90, HILLS = 10, TOTAL = 100, PREFIX = 'blotto1v1-';
+const DUR = 90, HILLS = 10, TOTAL = 100, STALE = 12000;
+const BROKERS = [
+  { url: 'wss://broker.emqx.io:8084/mqtt' },
+  { url: 'wss://public.cloud.shiftr.io', username: 'public', password: 'public' },
+  { url: 'wss://test.mosquitto.org:8081' }
+];
+const rnd = () => Math.random().toString(36).slice(2, 10);
 const app = document.getElementById('app');
-const S = { host:false, me:'', opp:'Opponent', mode:'unweighted', code:'', peer:null, conn:null,
-  mine:null, theirs:null, locked:false, oppLocked:false, sent:false, timer:null, endAt:0,
+const S = { id: rnd(), host:false, me:'', opp:'Opponent', oppId:null, lastSeen:0, mode:'unweighted', code:'',
+  mine:null, theirs:null, locked:false, oppLocked:false, sent:false, timer:null, hello:null, endAt:0,
   wins:[0,0], draws:0, phase:'home', rev:0 };
+const N = { clients:[], seen:new Set(), topic:'', failTimer:null };
 
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const val = i => S.mode === 'weighted' ? i + 1 : 1;
 const fmt = n => Number.isInteger(n) ? String(n) : n.toFixed(1);
 const pts = v => v + (v === 1 ? ' pt' : ' pts');
-const send = m => { if (S.conn && S.conn.open) S.conn.send(m); };
-const newCode = () => Math.random().toString(36).slice(2, 8);
+const oppLive = () => !!S.oppId && Date.now() - S.lastSeen < STALE;
+
+function netStop() {
+  clearTimeout(N.failTimer);
+  N.clients.forEach(c => { try { c.end(true); } catch (e) {} });
+  N.clients = [];
+}
+
+function netStart(onReady) {
+  netStop();
+  N.topic = 'blotto1v1/' + S.code;
+  let ready = false;
+  if (typeof mqtt === 'undefined') { home("Couldn't load the network library. Reload the page."); return; }
+  BROKERS.forEach(b => {
+    let c;
+    try {
+      c = mqtt.connect(b.url, { username: b.username, password: b.password, reconnectPeriod: 4000, connectTimeout: 8000, clean: true });
+    } catch (e) { return; }
+    N.clients.push(c);
+    c.on('connect', () => {
+      c.subscribe(N.topic, { qos: 1 }, err => {
+        if (!err && !ready) { ready = true; clearTimeout(N.failTimer); onReady(); }
+      });
+    });
+    c.on('message', (t, p) => {
+      let m;
+      try { m = JSON.parse(p.toString()); } catch (e) { return; }
+      if (!m || typeof m !== 'object' || m.from === S.id || N.seen.has(m.id)) return;
+      N.seen.add(m.id);
+      onData(m);
+    });
+    c.on('error', () => {});
+  });
+  N.failTimer = setTimeout(() => {
+    if (!ready) { netStop(); home("Couldn't reach a relay server. Check your connection and try again."); }
+  }, 15000);
+}
+
+function send(m) {
+  m.from = S.id;
+  m.id = rnd();
+  const s = JSON.stringify(m);
+  N.clients.forEach(c => { if (c.connected) c.publish(N.topic, s, { qos: 1 }); });
+}
+
+setInterval(() => {
+  if (S.oppId) send({ t:'ping' });
+  const el = document.getElementById('net');
+  el.textContent = (S.oppId && S.phase !== 'home' && !oppLive()) ? S.opp + ' seems to be offline. Waiting for them to come back…' : '';
+}, 4000);
 
 function home(msg) {
   S.phase = 'home';
+  clearInterval(S.hello);
   const joining = location.hash.length > 1;
   app.innerHTML = `
     <div class="panel">
@@ -94,73 +151,71 @@ function home(msg) {
 }
 
 function waiting(text) {
-  app.innerHTML = `<div class="panel"><p>${esc(text)}</p></div>`;
+  S.phase = 'connecting';
+  app.innerHTML = `<div class="panel"><p id="wait">${esc(text)}</p></div>`;
 }
 
 function createGame() {
   S.host = true;
-  S.code = newCode();
+  S.code = rnd().slice(0, 6);
+  S.oppId = null;
   waiting('Setting up your game…');
-  const peer = S.peer = new Peer(PREFIX + S.code);
-  peer.on('open', () => lobby());
-  peer.on('connection', c => {
-    if (S.conn && S.conn.open) { c.close(); return; }
-    bind(c);
-  });
-  peer.on('error', e => {
-    if (e.type === 'unavailable-id') { peer.destroy(); createGame(); return; }
-    if (S.phase === 'home' || !S.conn) home("Couldn't reach the connection server. Try again.");
-  });
+  netStart(() => lobby());
 }
 
 function joinGame() {
   S.host = false;
   S.code = location.hash.slice(1);
+  S.oppId = null;
   waiting('Connecting to the game…');
-  const peer = S.peer = new Peer();
-  peer.on('open', () => bind(peer.connect(PREFIX + S.code, { reliable: true })));
-  peer.on('error', e => {
-    if (e.type === 'peer-unavailable') home('No game found at this link. The host needs to keep their tab open.');
-    else if (!S.conn || !S.conn.open) home("Couldn't connect. Try again.");
+  netStart(() => {
+    const started = Date.now();
+    const hi = () => {
+      send({ t:'hello', name:S.me });
+      const el = document.getElementById('wait');
+      if (el && Date.now() - started > 10000) el.textContent = 'No reply from the host yet. Ask them to keep their game tab open. Still trying…';
+    };
+    hi();
+    clearInterval(S.hello);
+    S.hello = setInterval(hi, 2000);
   });
-}
-
-function bind(c) {
-  S.conn = c;
-  c.on('open', () => {
-    send({ t:'hello', name:S.me });
-    if (!S.host) { S.phase = 'lobby'; lobby(); }
-  });
-  c.on('data', onData);
-  c.on('close', dropped);
-}
-
-function dropped() {
-  if (S.conn && S.conn.open) return;
-  clearInterval(S.timer);
-  S.rev++;
-  S.conn = null;
-  if (S.host) { S.opp = 'Opponent'; lobby('Your friend disconnected. They can rejoin with the same link.'); }
-  else {
-    app.innerHTML = `<div class="panel"><p>Connection lost.</p><button id="re" class="primary">Rejoin</button></div>`;
-    document.getElementById('re').onclick = () => location.reload();
-  }
 }
 
 function onData(m) {
-  if (!m || typeof m !== 'object') return;
   if (m.t === 'hello') {
+    if (!S.host) return;
+    if (S.oppId && m.from !== S.oppId && oppLive()) return;
+    const isNew = m.from !== S.oppId;
+    S.oppId = m.from;
+    S.lastSeen = Date.now();
     S.opp = String(m.name || 'Opponent').slice(0, 20);
-    if (S.phase === 'lobby') lobby();
-  } else if (m.t === 'start') {
+    send({ t:'welcome', name:S.me, to:m.from });
+    if (S.phase === 'lobby' || isNew) { clearInterval(S.timer); S.rev++; lobby(); }
+    return;
+  }
+  if (m.t === 'welcome') {
+    if (S.host || m.to !== S.id || S.oppId) return;
+    clearInterval(S.hello);
+    S.oppId = m.from;
+    S.lastSeen = Date.now();
+    S.opp = String(m.name || 'Opponent').slice(0, 20);
+    lobby();
+    return;
+  }
+  if (!S.oppId || m.from !== S.oppId) return;
+  S.lastSeen = Date.now();
+  if (m.t === 'start') {
+    if (S.host) return;
     S.mode = m.mode === 'weighted' ? 'weighted' : 'unweighted';
     startRound();
   } else if (m.t === 'locked') {
+    if (S.phase !== 'play') return;
     S.oppLocked = true;
     const el = document.getElementById('oppst');
-    if (el) el.textContent = S.opp + ' has locked in.';
+    if (el && !S.sent) el.textContent = S.opp + ' has locked in.';
     if (S.locked) submit();
   } else if (m.t === 'alloc') {
+    if (S.phase !== 'play') return;
     S.theirs = clean(m.v);
     if (!S.sent) submit();
     maybeReveal();
@@ -196,9 +251,8 @@ function hostStart() {
   startRound();
 }
 
-function lobby(note) {
+function lobby() {
   S.phase = 'lobby';
-  const connected = S.conn && S.conn.open;
   if (!S.host) {
     app.innerHTML = `<div class="panel"><h2>You're in</h2><p class="dim">Waiting for ${esc(S.opp)} to start the round.</p></div>`;
     return;
@@ -208,12 +262,12 @@ function lobby(note) {
     <div class="panel">
       <label for="link">Invite link</label>
       <div class="row"><input id="link" class="grow" readonly value="${esc(link)}"><button id="copy">Copy link</button></div>
-      <p class="dim" style="margin-top:10px">${note ? esc(note) : connected ? esc(S.opp) + ' has joined.' : 'Waiting for your friend to open the link. Keep this tab open.'}</p>
+      <p class="dim" style="margin-top:10px">${S.oppId ? esc(S.opp) + ' has joined.' : 'Waiting for your friend to open the link. Keep this tab open.'}</p>
     </div>
     <div class="panel">
       <label>Mode</label>
       ${modeButtons()}
-      <button id="start" class="primary" ${connected ? '' : 'disabled'}>Start round</button>
+      <button id="start" class="primary" ${S.oppId ? '' : 'disabled'}>Start round</button>
     </div>`;
   wireModes();
   document.getElementById('copy').onclick = () => {
